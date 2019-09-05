@@ -1,7 +1,9 @@
 """Connection session."""
+import asyncio
 import voluptuous as vol
 
 from homeassistant.core import callback, Context
+from homeassistant.exceptions import Unauthorized
 
 from . import const, messages
 
@@ -20,7 +22,7 @@ class ActiveConnection:
         else:
             self.refresh_token_id = None
 
-        self.event_listeners = {}
+        self.subscriptions = {}
         self.last_id = 0
 
     def context(self, msg):
@@ -31,48 +33,88 @@ class ActiveConnection:
         return Context(user_id=user.id)
 
     @callback
+    def send_result(self, msg_id, result=None):
+        """Send a result message."""
+        self.send_message(messages.result_message(msg_id, result))
+
+    async def send_big_result(self, msg_id, result):
+        """Send a result message that would be expensive to JSON serialize."""
+        content = await self.hass.async_add_executor_job(
+            const.JSON_DUMP, messages.result_message(msg_id, result)
+        )
+        self.send_message(content)
+
+    @callback
+    def send_error(self, msg_id, code, message):
+        """Send a error message."""
+        self.send_message(messages.error_message(msg_id, code, message))
+
+    @callback
     def async_handle(self, msg):
         """Handle a single incoming message."""
         handlers = self.hass.data[const.DOMAIN]
 
         try:
             msg = messages.MINIMAL_MESSAGE_SCHEMA(msg)
-            cur_id = msg['id']
+            cur_id = msg["id"]
         except vol.Invalid:
-            self.logger.error('Received invalid command', msg)
-            self.send_message(messages.error_message(
-                msg.get('id'), const.ERR_INVALID_FORMAT,
-                'Message incorrectly formatted.'))
+            self.logger.error("Received invalid command", msg)
+            self.send_message(
+                messages.error_message(
+                    msg.get("id"),
+                    const.ERR_INVALID_FORMAT,
+                    "Message incorrectly formatted.",
+                )
+            )
             return
 
         if cur_id <= self.last_id:
-            self.send_message(messages.error_message(
-                cur_id, const.ERR_ID_REUSE,
-                'Identifier values have to increase.'))
+            self.send_message(
+                messages.error_message(
+                    cur_id, const.ERR_ID_REUSE, "Identifier values have to increase."
+                )
+            )
             return
 
-        if msg['type'] not in handlers:
-            self.logger.error(
-                'Received invalid command: {}'.format(msg['type']))
-            self.send_message(messages.error_message(
-                cur_id, const.ERR_UNKNOWN_COMMAND,
-                'Unknown command.'))
+        if msg["type"] not in handlers:
+            self.logger.error("Received invalid command: {}".format(msg["type"]))
+            self.send_message(
+                messages.error_message(
+                    cur_id, const.ERR_UNKNOWN_COMMAND, "Unknown command."
+                )
+            )
             return
 
-        handler, schema = handlers[msg['type']]
+        handler, schema = handlers[msg["type"]]
 
         try:
             handler(self.hass, self, schema(msg))
-        except Exception:  # pylint: disable=broad-except
-            self.logger.exception('Error handling message: %s', msg)
-            self.send_message(messages.error_message(
-                cur_id, const.ERR_UNKNOWN_ERROR,
-                'Unknown error.'))
+        except Exception as err:  # pylint: disable=broad-except
+            self.async_handle_exception(msg, err)
 
         self.last_id = cur_id
 
     @callback
     def async_close(self):
         """Close down connection."""
-        for unsub in self.event_listeners.values():
+        for unsub in self.subscriptions.values():
             unsub()
+
+    @callback
+    def async_handle_exception(self, msg, err):
+        """Handle an exception while processing a handler."""
+        if isinstance(err, Unauthorized):
+            code = const.ERR_UNAUTHORIZED
+            err_message = "Unauthorized"
+        elif isinstance(err, vol.Invalid):
+            code = const.ERR_INVALID_FORMAT
+            err_message = vol.humanize.humanize_error(msg, err)
+        elif isinstance(err, asyncio.TimeoutError):
+            code = const.ERR_TIMEOUT
+            err_message = "Timeout"
+        else:
+            code = const.ERR_UNKNOWN_ERROR
+            err_message = "Unknown error"
+
+        self.logger.exception("Error handling message: %s", err_message)
+        self.send_message(messages.error_message(msg["id"], code, err_message))

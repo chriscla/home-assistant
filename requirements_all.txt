@@ -446,7 +446,7 @@ enocean==0.50
 enturclient==0.2.0
 
 # homeassistant.components.environment_canada
-env_canada==0.0.24
+env_canada==0.0.25
 
 # homeassistant.components.envirophat
 # envirophat==0.0.6
@@ -1346,6 +1346,9 @@ pynws==0.7.4
 
 # homeassistant.components.nx584
 pynx584==0.4
+
+# homeassistant.components.nzbget
+pynzbgetapi==0.2.0
 
 # homeassistant.components.obihai
 pyobihai==1.0.2
